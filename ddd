@@ -1,0 +1,6 @@
+def get_new_ohlcv(hour='9h'):
+    df = pyupbit.get_ohlcv(ticker="KRW-BTC", interval='minute60', count=150)
+    df_resampling = df.resample('24H', offset=hour).agg(\
+                                    {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'})
+    df_new = df_resampling[-6:-1]
+    return df_new
