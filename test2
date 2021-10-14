@@ -1,104 +1,123 @@
-import time
-import pyupbit
+import pandas as pd
 import datetime
-import requests
+import pyupbit
+import time
+import numpy as np
 
-access = "your access"  # API
-secret = "your secret"  # API
-myToken = "your token"  # slack token
+# 시간 단위 200개 데이터 씩 전체 가져오는것을 함수화 (완성본)
+def hour_data_load():
+    end_date = None  # 현재 시간 기준으로 설정
+    df_new = pd.DataFrame()
+    target_time = datetime.datetime.strptime('2017-09-25 12:00:00', '%Y-%m-%d %H:%M:%S')  # 시작 데이터 시점
+    i = 0
 
-def post_message(token, channel, text):
-    """슬랙 메시지 전송"""
-    response = requests.post("https://slack.com/api/chat.postMessage",
-                             headers={"Authorization": "Bearer " + token},
-                             data={"channel": channel, "text": text}
-                             )
+    while True:
+        df = pyupbit.get_ohlcv(ticker="KRW-BTC", interval='minute60', to=end_date)
+        end_date = df.index[0]
+        df_new = df_new.append(df)  # df를 df_new에 합침
+        time.sleep(0.5)     # 0.5초 쉬고
+        print(i, end_date)  # 프로그램 running 중임을 표시
+        i += 1
+        # target_time 보다 작을때까지만 running
+        if end_date <= target_time:
+            break
 
-# new method
-def get_new_ohlcv(hour='9h'):
-    df = pyupbit.get_ohlcv(ticker="KRW-BTC", interval='minute60', count=150)
-    df_resampling = df.resample('24H', offset=hour).agg(\
-                                    {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'})
-    df_new = df_resampling[-6:-1]
+    df_new = df_new.sort_index()  # 일자 기준으로 sort
+    df_new.to_csv('hour_data.csv')    # csv로 저장하기
+
     return df_new
 
 
+# 시간 단위로 가져온 전체 data를 resampling 하기_원하는 시간 기준 입력 (완성본). CSV 데이터로 가져옴
+def day_resampling(hour = '9h'):    # 9시를 default로
+    # csv로 시간 단위 데이터 가져오기
+    df = pd.read_csv('C:\\Users\\KDH\\PycharmProjects\\bitcoin\\hour_data.csv')
+    df['Unnamed: 0'] = pd.to_datetime(df['Unnamed: 0'])     # 열을 datetime으로 변경하고
+    df.rename(columns={'Unnamed: 0': 'Time'}, inplace=True) # 열이름 변경하고
+    df.set_index('Time', inplace=True)                # datetime 열을 index로 설정
 
-def get_target_price(ticker, k):
-    df = pyupbit.get_ohlcv(ticker, interval="day", count=2)
-    target_price = df.iloc[0]['close'] + (df.iloc[0]['high'] - df.iloc[0]['low']) * k
-    return target_price
+    # 시간 단위 데이터 resampling 하기
+    df_resampling = df.resample('24H', offset=hour).agg(\
+                                    {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'})
+    # csv로 데이터 저장하기
+    # df_resampling.to_csv('day_data_'+hour+'.csv')
 
-def get_start_time(ticker):
-    df = pyupbit.get_ohlcv(ticker, interval="day", count=1)
-    start_time = df.index[0]
-    return start_time
-
-def get_ma5(ticker):
-    df = pyupbit.get_ohlcv(ticker, interval="day", count=5)
-    ma5 = df['close'].rolling(5).mean().iloc[-1]
-    return ma5
-
-def get_balance(ticker):
-    balances = upbit.get_balances()
-    for b in balances:
-        if b['currency'] == ticker:
-            if b['balance'] is not None:
-                return float(b['balance'])
-            else:
-                return 0
-    return 0
-
-def get_current_price(ticker):
-    return pyupbit.get_orderbook(tickers=ticker)[0]["orderbook_units"][0]["ask_price"]
-
-def get_buying_ratio(ticker, risk):
-    df = pyupbit.get_ohlcv(ticker, interval="day", count=2)
-    range_ratio = (df.iloc[0]['high'] - df.iloc[0]['low'])/df.iloc[0]['close']
-    buying_ratio = risk/range_ratio
-    ratio = min([1, round(buying_ratio, 2)])
-    return ratio
-
-# 로그인
-upbit = pyupbit.Upbit(access, secret)
-print("autotrade start")    # 날짜가 바뀌면 매일 아침 시작 알림 띄우기하자
-post_message(myToken,"#coin", "Autotrade start")
-
-# 값초기화
-buy_result, daily_msg, sell_result = None, None, None
+    return df_resampling
 
 
-while True:
-    try:
-        now = datetime.datetime.now()
-        df_new = get_new_ohlcv(hour='11h)
-        start_time = df_new.index[-1]
-        end_time = start_time + datetime.timedelta(days=1)  # 9:00 + 1일
-        ratio = get_buying_ratio("KRW-BTC", 0.02)
+# 일단위 데이터로 backtest
+def run_backtest(ticker='KRW-BTC', fee=0.001, k=0.5, risk_rate=0.02, ma=5, hour='9h'):
+    df = day_resampling(hour)
+    df['range'] = (df['high'] - df['low']).shift(1)
+    df['range_rate'] = (df['range'] / df['open']) * 100
+    df['ma5'] = df['close'].rolling(window=ma).mean().shift(1)
+    df['decision'] = np.where((df['high'] > df['open'] + df['range'] * k) & (df['high'] > df['ma5']), 'buy', np.nan)
+    df['buy_price'] = np.where(df['decision'] == 'buy', df['open'] + df['range'] * k, np.nan)
+    df['sell_price'] = np.where(df['decision'] == 'buy', df['close'], np.nan)
+    df['buying_rate'] = np.where(risk_rate / df['range_rate'] * 100 > 1, 1, risk_rate / df['range_rate'] * 100)
+    df['ror'] = np.where(df['decision'] == 'buy', (((df['sell_price'] * (1 - fee)) / \
+                                                    (df['buy_price'] * (1 + fee))) - 1) * df['buying_rate'] + 1, 1)
+    df['hpr'] = df['ror'].cumprod()
+    df['dd'] = (df['hpr'].cummax() - df['hpr']) / df['hpr'].cummax() * 100
 
-        if start_time < now < end_time - datetime.timedelta(seconds=60):
-            target_price = get_target_price("KRW-BTC", 0.5)
-            ma5 = get_ma5("KRW-BTC")
-            current_price = get_current_price("KRW-BTC")
-            daily_msg, sell_result = None, None     # 각 초기화해주고
-            if target_price < current_price and ma5 < current_price:
-                budget = get_balance("KRW") * ratio         
-                if budget > 5000 and (buy_result is None or 'error' in buy_result):
-                    buy_result = upbit.buy_market_order("KRW-BTC", budget*0.9995)
-                    post_message(myToken, "#coin", "BTC buy : " +str(buy_result))
+    days = df.index[-2] - df.index[0]
+    cagr = round((df['hpr'][-2] ** (1 / (days.days / 365)) - 1) * 100, 2)
+    mdd = round(df['dd'].max(), 2)
 
-        else:
-            btc = get_balance("BTC")
-            buy_result = None       
-            if btc > 0.00008 and (sell_result is None or 'error' in sell_result):
-                sell_result = upbit.sell_market_order("KRW-BTC", btc)
-                post_message(myToken, "#coin", "BTC sell : " + str(sell_result))
-            # 프로그램 가동중임을 알리는 알람
-            if daily_msg is None:
-                post_message(myToken, "#coin", "program is running")
-                daily_msg = "On"
-        time.sleep(1)
-    except Exception as e:
-        print(e)
-        post_message(myToken, "#coin", e)
-        time.sleep(1)
+    # winning_rate & profit per loss 추가하기
+
+    win_mask = data['ror'] > 1     # 마스크 사용
+    loss_mask = data['ror'] < 1
+
+    win_counts = win_mask.sum()   
+    loss_counts = loss_mask.sum()
+
+    buy_counts = data['decision'].value_counts()['buy']     
+    winning_rate = round(win_counts/buy_counts, 2)   
+
+    win_avg = (df.loc[win_mask, 'ror'].sum() - win_counts)/win_counts
+    loss_avg = (df.loc[loss_mask, 'ror'].sum() - loss_counts)/loss_counts
+
+    # 퍼센트 표기 및 자릿수 변경
+    win_avg = round(win_avg * 100, 2)
+    loss_avg = round(loss_avg * 100, 2)
+    
+    profit_per_loss = round(win_avg/abs(loss_avg), 2)     
+
+    # csv로 데이터 저장하기
+    # df.to_csv('backtest_'+hour+'.csv')
+
+    # 딕셔너리로 출력값 한번에 return, CAGR, MDD, winning_rate, profit_per_loss
+    return {'GACR(%)' : cagr, 'MDD(%)' : mdd, 'winning_rate' : winning_rate, 'profit_per_loss' : profit_per_loss}
+
+    # return df
+
+
+
+# 시간단위 모든 data 가져오기
+# df = hour_data_load()
+
+# 10시 기준으로 data_resampling
+# testdata = day_resampling('10h')
+
+# backtest 실시
+# backtest_10h = run_backtest(hour='10h')
+# print(backtest_10h)
+
+
+# 반복문
+
+# hpr = {}
+# k_list = np.arange(0.1, 1, 0.1)
+#
+# for j in range(24):
+#     hours = str(j)+'h'
+#     for i in k_list:
+#         value = run_backtest(k=i, hour=hours)
+#         hpr[j, i] = value
+#     j += 1
+#
+# df_new = pd.DataFrame(hpr)
+# df_new = df_new.T
+# print(df_new)
+# df_new.to_excel('backtest_total_result.xlsx')
